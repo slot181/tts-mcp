@@ -95,7 +95,7 @@ async function textToSpeechAndSave(options: TTSSaveOptions): Promise<TTSSaveResu
     const buffer = Buffer.from(await response.arrayBuffer());
     
     // 出力ディレクトリとファイルパスを定義
-    const outputDir = path.join(process.cwd(), 'output', 'mcp');
+    const outputDir = path.join(process.cwd(), 'output', 'openai-tts-mcp'); // パスを変更
     const outputFilename = `speech_${Date.now()}.${safeFormat}`;
     const outputPath = path.join(outputDir, outputFilename);
 
