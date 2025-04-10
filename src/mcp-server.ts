@@ -5,12 +5,12 @@ import * as z from "zod";
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";  // 一時ディレクトリのパスを取得するために使用
-import playSound from "play-sound";
+// import playSound from "play-sound"; // 削除: 再生機能は使わない
 import { MCPServerConfig, OpenAIVoice, OpenAIOutputFormat, OpenAITTSModel } from "./types";
-import { validateVoice, validateModel, validateFormat } from "./utils";
+import { validateVoice, validateModel, validateFormat, ensureOutputDirectory } from "./utils"; // 追加: ensureOutputDirectory
 
-// プレイヤーの初期化
-const player = playSound({});
+// // プレイヤーの初期化 // 削除
+// const player = playSound({}); // 削除
 
 // ログファイルパス
 let logFile = path.join(process.cwd(), 'tts-mcp.log');
@@ -47,7 +47,8 @@ export function initializeClient(apiKey: string, baseUrl?: string): OpenAI {
   });
 }
 
-interface TTSPlayOptions {
+// オプション名はそのまま利用可能
+interface TTSSaveOptions { // 名前変更: Play -> Save (任意だが分かりやすい)
   text: string;
   model: OpenAITTSModel;
   voice: OpenAIVoice;
@@ -58,19 +59,20 @@ interface TTSPlayOptions {
   baseUrl?: string; // 追加: APIベースURL
 }
 
-interface TTSPlayResult {
-  duration: string;
+// 結果インターフェースを変更
+interface TTSSaveResult {
+  filePath: string; // 保存されたファイルパス
   textLength: number;
 }
 
 /**
- * テキストを音声に変換して再生します
- * @param {TTSPlayOptions} options - 変換オプション
- * @returns {Promise<TTSPlayResult>} 処理結果
+ * テキストを音声に変換してファイルに保存します
+ * @param {TTSSaveOptions} options - 変換オプション
+ * @returns {Promise<TTSSaveResult>} 処理結果（ファイルパスを含む）
  */
-async function textToSpeechAndPlay(options: TTSPlayOptions): Promise<TTSPlayResult> {
+async function textToSpeechAndSave(options: TTSSaveOptions): Promise<TTSSaveResult> { // 名前変更: Play -> Save, 型変更
   const client = initializeClient(options.apiKey, options.baseUrl); // 変更: baseUrlを渡す
-  let tempFilePath: string | null = null;
+  // let tempFilePath: string | null = null; // 削除: 一時ファイルは使わない
   
   try {
     await logToFile('音声生成開始...');
@@ -92,55 +94,29 @@ async function textToSpeechAndPlay(options: TTSPlayOptions): Promise<TTSPlayResu
     // 音声データを取得
     const buffer = Buffer.from(await response.arrayBuffer());
     
-    // 直接一時ファイルパスを生成
-    tempFilePath = path.join(os.tmpdir(), `speech_${Date.now()}.${safeFormat}`);
-    
+    // 出力ディレクトリとファイルパスを定義
+    const outputDir = path.join(process.cwd(), 'output', 'mcp');
+    const outputFilename = `speech_${Date.now()}.${safeFormat}`;
+    const outputPath = path.join(outputDir, outputFilename);
+
+    // 出力ディレクトリが存在することを確認
+    await ensureOutputDirectory(outputPath); // utilsからインポートした関数を使用
+
     // バッファをファイルに書き込む
-    await fs.writeFile(tempFilePath, buffer);
+    await fs.writeFile(outputPath, buffer);
+
+    await logToFile(`音声ファイルを作成しました: ${outputPath}`);
     
-    await logToFile(`音声ファイルを作成しました: ${tempFilePath}`);
+    // --- 再生ロジック削除 ---
     
-    // 再生開始時間を記録
-    const startTime = Date.now();
-    
-    await logToFile(`音声を再生します: ${tempFilePath}`);
-    
-    // 音声を再生（Promise化）
-    await new Promise<void>((resolve, reject) => {
-      player.play(tempFilePath!, (err: Error | null) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-    
-    // 再生時間を計算（秒単位）
-    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    
-    await logToFile(`音声の再生が完了しました（再生時間: ${duration}秒）`);
-    
-    // 一時ファイルの削除を試みる（任意）
-    try {
-      await fs.unlink(tempFilePath);
-      await logToFile(`一時ファイルを削除しました: ${tempFilePath}`);
-    } catch (cleanupError) {
-      await logToFile(`一時ファイルの削除に失敗しました: ${(cleanupError as Error).message}`);
-      // 削除に失敗しても処理は続行
-    }
-    
+    // 結果としてファイルパスとテキスト長を返す
     return {
-      duration,
+      filePath: outputPath,
       textLength: options.text.length
     };
   } catch (error: any) {
-    // エラーが発生した場合、一時ファイルが存在していれば削除を試みる
-    if (tempFilePath) {
-      try {
-        await fs.unlink(tempFilePath);
-      } catch (cleanupError) {
-        // 削除エラーは無視
-      }
-    }
-    
+    // --- 一時ファイル削除ロジック削除 ---
+
     // APIエラーをより詳細にログ記録
     if (error.response) {
       const apiError = error.response.data;
@@ -198,11 +174,11 @@ async function createMcpServer(config: MCPServerConfig): Promise<McpServer> {
   // テキスト音声変換と再生ツールを追加
   server.tool(
     "text-to-speech",
-    "Converts text to speech and plays it using OpenAI's TTS API",
+    "Converts text to speech using OpenAI's TTS API and saves it to a file", // 説明を更新
     textToSpeechShape, // Raw Shapeを使用
     async (params: TextToSpeechParams) => { // 型を指定
       try {
-        const result = await textToSpeechAndPlay({
+        const result = await textToSpeechAndSave({ // 関数名変更
           text: params.text,
           model: config.model,
           voice: config.voice,
@@ -210,18 +186,18 @@ async function createMcpServer(config: MCPServerConfig): Promise<McpServer> {
           format: config.format,
           instructions: params.instructions,
           apiKey: config.apiKey,
-          baseUrl: config.baseUrl // 追加: baseUrlを渡す
+          baseUrl: config.baseUrl
         });
         
         return {
-          content: [
+          content: [ // 応答メッセージを変更
             {
               type: "text",
-              text: `テキストを音声で再生しました（再生時間: ${result.duration}秒）`
+              text: `音声ファイルを保存しました: ${result.filePath}`
             }
           ],
-          metadata: {
-            duration: result.duration,
+          metadata: { // メタデータを変更
+            file_path: result.filePath,
             text_length: result.textLength
           }
         };
@@ -230,7 +206,7 @@ async function createMcpServer(config: MCPServerConfig): Promise<McpServer> {
           content: [
             {
               type: "text",
-              text: `エラー: 音声の生成または再生に失敗しました`
+              text: `エラー: 音声の生成または保存に失敗しました` // エラーメッセージ変更
             },
             {
               type: "text",
